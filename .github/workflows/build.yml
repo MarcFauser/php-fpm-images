@@ -1,0 +1,237 @@
+name: build
+
+# Builds one image per PHP minor (every <major>.<minor> directory, scripts/minors.sh) on the
+# official php:<minor>-fpm base, tests it (tests/test-image.sh) and publishes it to
+# ghcr.io/marcfauser/php-fpm-images.
+#
+# Pull requests: build and test only. Pushes to main and manual runs (also the daily one from
+# check.yml when a base image changed): build, test, and publish a minor only when its
+# fingerprint (base digest + Dockerfile) differs from the one in published.txt, or when the
+# run is started with force. So an unchanged image is never pushed again and the server has
+# nothing to pull. Afterwards the record job commits the new lines of published.txt.
+#
+# No schedule here: GitHub disables a scheduled workflow after 60 days without repository
+# activity, and with it every other trigger of that workflow. check.yml starts this one.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+      - published.txt
+      - _git_hooks/**
+      - install-git-hooks.*
+      - .gitattributes
+      - .gitignore
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Publish every minor, even if its fingerprint is unchanged
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One publishing run at a time; a run started while another is busy waits for it.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/marcfauser/php-fpm-images
+
+jobs:
+  minors:
+    name: list the PHP minors
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      minors: ${{ steps.list.outputs.minors }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: |
+          minors="$(scripts/minors.sh | jq -R . | jq -cs .)"
+          [ "$minors" != '[]' ] || { echo "no <major>.<minor> directory with a Dockerfile" >&2; exit 1; }
+          echo "minors=$minors" >> "$GITHUB_OUTPUT"
+          echo "minors: $minors"
+
+  image:
+    name: PHP ${{ matrix.minor }}
+    needs: minors
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ${{ fromJSON(needs.minors.outputs.minors) }}
+    env:
+      MINOR: ${{ matrix.minor }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install the FastCGI client for the tests
+        # sudo: GitHub's runners run as a normal user.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfcgi-bin
+
+      - name: resolve the base image
+        id: base
+        run: |
+          digest="$(scripts/base-digest.sh "php:${MINOR}-fpm")"
+          fingerprint="$( { echo "$digest"; cat "${MINOR}/Dockerfile"; } | sha256sum | cut -d ' ' -f 1)"
+          docker pull --quiet "php:${MINOR}-fpm@${digest}" > /dev/null
+          php_version="$(docker run --rm "php:${MINOR}-fpm@${digest}" php -r 'echo PHP_VERSION;')"
+          repo_version="$(sed -n 's/^## \[\([0-9][0-9.]*\)\].*/\1/p' CHANGELOG.md | head -n 1)"
+          [ -n "$repo_version" ] || { echo "no version in CHANGELOG.md" >&2; exit 1; }
+          {
+            echo "digest=$digest"
+            echo "fingerprint=$fingerprint"
+            echo "php_version=$php_version"
+            echo "repo_version=$repo_version"
+            echo "created=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "stamp=$(date -u '+%Y%m%d.%H%M%S')"
+          } >> "$GITHUB_OUTPUT"
+          echo "base php:${MINOR}-fpm@${digest}, PHP ${php_version}, fingerprint ${fingerprint}"
+
+      - name: build
+        env:
+          DIGEST: ${{ steps.base.outputs.digest }}
+          FINGERPRINT: ${{ steps.base.outputs.fingerprint }}
+          PHP_VERSION: ${{ steps.base.outputs.php_version }}
+          REPO_VERSION: ${{ steps.base.outputs.repo_version }}
+          CREATED: ${{ steps.base.outputs.created }}
+        run: |
+          docker build \
+            --build-arg "BASE=php:${MINOR}-fpm@${DIGEST}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.description=PHP ${PHP_VERSION} FPM with mysqli, pdo_mysql, pdo_pgsql, pgsql, intl, zip, gd, exif, mbstring" \
+            --label "org.opencontainers.image.version=${PHP_VERSION}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.created=${CREATED}" \
+            --label "org.opencontainers.image.base.name=docker.io/library/php:${MINOR}-fpm" \
+            --label "org.opencontainers.image.base.digest=${DIGEST}" \
+            --label "io.github.marcfauser.php-fpm-images.version=${REPO_VERSION}" \
+            --label "io.github.marcfauser.php-fpm-images.fingerprint=${FINGERPRINT}" \
+            --tag "local/php-fpm:${MINOR}" \
+            "${MINOR}"
+
+      - name: test
+        run: tests/test-image.sh "local/php-fpm:${MINOR}" "${MINOR}"
+
+      - name: decide whether to publish
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+          FINGERPRINT: ${{ steps.base.outputs.fingerprint }}
+        run: |
+          published="$(awk -v m="$MINOR" '$1 == m { print $2 }' published.txt)"
+          if [ "$EVENT" = pull_request ]
+          then
+            publish=no; why="pull request"
+          elif [ "$FORCE" = true ]
+          then
+            publish=yes; why="forced"
+          elif [ "$published" = "$FINGERPRINT" ]
+          then
+            publish=no; why="fingerprint unchanged"
+          else
+            publish=yes; why="fingerprint ${published:-none} -> ${FINGERPRINT}"
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "publish: $publish ($why)"
+
+      - name: publish
+        if: steps.decide.outputs.publish == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.base.outputs.digest }}
+          FINGERPRINT: ${{ steps.base.outputs.fingerprint }}
+          PHP_VERSION: ${{ steps.base.outputs.php_version }}
+          CREATED: ${{ steps.base.outputs.created }}
+          STAMP: ${{ steps.base.outputs.stamp }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          # <minor> is what the server uses; <php version> and <php version>-<stamp> stay as
+          # fixed points to go back to.
+          for tag in "${MINOR}" "${PHP_VERSION}" "${PHP_VERSION}-${STAMP}"
+          do
+            docker tag "local/php-fpm:${MINOR}" "${IMAGE}:${tag}"
+            docker push --quiet "${IMAGE}:${tag}"
+          done
+          image_digest="$(docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${MINOR}" | sed -n "s|^${IMAGE}@||p" | head -n 1)"
+          [ -n "$image_digest" ] || { echo "no registry digest after the push" >&2; exit 1; }
+          mkdir -p record
+          echo "${MINOR} ${FINGERPRINT} ${DIGEST} ${PHP_VERSION} ${image_digest} ${CREATED}" > "record/${MINOR}.txt"
+          echo "published ${IMAGE}:${MINOR} = ${PHP_VERSION} (${image_digest})"
+
+      - name: keep the published line for the record job
+        if: steps.decide.outputs.publish == 'yes'
+        uses: actions/upload-artifact@v7
+        with:
+          name: published-${{ matrix.minor }}
+          path: record/${{ matrix.minor }}.txt
+          retention-days: 7
+
+  record:
+    name: record what was published
+    needs: image
+    # Also after a failed minor: the others may have been published and must be recorded.
+    if: always() && github.event_name != 'pull_request' && needs.image.result != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: published-*
+          path: record
+          merge-multiple: true
+
+      - name: update published.txt
+        run: |
+          shopt -s nullglob
+          lines=(record/*.txt)
+          if [ "${#lines[@]}" -eq 0 ]
+          then
+            echo "nothing was published"
+            exit 0
+          fi
+          for file in "${lines[@]}"
+          do
+            minor="$(cut -d ' ' -f 1 "$file")"
+            awk -v m="$minor" '$1 != m' published.txt > published.new
+            cat "$file" >> published.new
+            mv published.new published.txt
+          done
+          # Comment lines stay on top, the data lines sorted by minor.
+          { grep '^#' published.txt; grep -v '^#' published.txt | sort -V; } > published.new
+          mv published.new published.txt
+          cat published.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add published.txt
+          if git diff --cached --quiet
+          then
+            echo "published.txt unchanged"
+            exit 0
+          fi
+          git commit -m "Record published images: $(cut -d ' ' -f 1,4 record/*.txt | paste -sd ',' | sed 's/,/, /g')"
+          # A commit made with GITHUB_TOKEN starts no workflow, so this does not loop.
+          for attempt in 1 2 3
+          do
+            git pull --rebase --quiet origin main && git push origin HEAD:main && exit 0
+            sleep 5
+          done
+          echo "could not push published.txt" >&2
+          exit 1

@@ -1,0 +1,88 @@
+name: check
+
+# Once a day, two questions to Docker Hub:
+# 1. Does php:<minor>-fpm still point to the base digest recorded in published.txt? If not for
+#    any minor (Debian security updates, a new PHP patch release), it starts build.yml on
+#    main, which rebuilds, tests and publishes only what changed.
+# 2. Is there a php:<minor>-fpm newer than the highest minor built here (the next minor, or
+#    the next major's .0)? Then it opens an issue - GitHub mails it to the repository's
+#    owner - because a new minor is a decision (a new container on the server), not an update.
+#
+# A workflow of its own because GitHub disables a scheduled workflow after 60 days without
+# repository activity, and with it all its other triggers; here that stops only this daily
+# check, not builds started by a push. The record job's commits of published.txt count as
+# activity whenever a base image changes. Re-enable with
+#   gh workflow enable check.yml --repo MarcFauser/php-fpm-images
+on:
+  schedule:
+    # 04:23 UTC every day. Not on the hour: GitHub delays scheduled runs then, and may drop some.
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: compare with Docker Hub
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: base images
+        run: |
+          changed=""
+          for minor in $(scripts/minors.sh)
+          do
+            digest="$(scripts/base-digest.sh "php:${minor}-fpm")"
+            recorded="$(awk -v m="$minor" '$1 == m { print $3 }' published.txt)"
+            if [ "$digest" = "$recorded" ]
+            then
+              echo "php:${minor}-fpm unchanged (${digest})"
+            else
+              echo "php:${minor}-fpm changed: ${recorded:-nothing recorded} -> ${digest}"
+              changed="${changed} ${minor}"
+            fi
+          done
+          if [ -n "$changed" ]
+          then
+            # A run started with GITHUB_TOKEN through workflow_dispatch does start (GitHub docs,
+            # "Triggering a workflow from a workflow").
+            gh workflow run build.yml --ref main
+            echo "started build.yml on main for:${changed}"
+          fi
+
+      - name: new PHP version
+        run: |
+          latest="$(scripts/minors.sh | tail -n 1)"
+          major="${latest%%.*}"
+          minor="${latest#*.}"
+          for candidate in "${major}.$((minor + 1))" "$((major + 1)).0"
+          do
+            if ! scripts/base-digest.sh "php:${candidate}-fpm" > /dev/null 2>&1
+            then
+              echo "php:${candidate}-fpm does not exist (yet)"
+              continue
+            fi
+            title="php:${candidate}-fpm is available"
+            # Exact title match on the open issues, not the search syntax ("php:" looks like
+            # a qualifier there); otherwise a second issue would appear every day.
+            open="$(gh issue list --state open --limit 500 --json title --jq "[.[] | select(.title == \"${title}\")] | length")"
+            if [ "$open" != 0 ]
+            then
+              echo "${title}: issue already open"
+              continue
+            fi
+            gh issue create --title "$title" --body "Docker Hub has \`php:${candidate}-fpm\`; the highest minor built here is ${latest}.
+
+          To build it, add a \`${candidate}/\` directory with a \`Dockerfile\` and a \`modules.txt\` (start from \`${latest}/\`, then read the PHP UPGRADING notes and the docker-library/php changes for that version). The server needs its own compose service, www.conf and php.ini for it."
+            echo "${title}: issue opened"
+          done

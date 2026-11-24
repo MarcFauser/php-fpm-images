@@ -1,0 +1,6 @@
+# What the build workflow last published, one line per PHP minor. Written by the record job
+# of .github/workflows/build.yml after publishing; read by build.yml (publish only when the
+# fingerprint changed) and by check.yml (start a build when Docker Hub's base digest differs).
+# The fingerprint is sha256 over the base digest and the minor's Dockerfile.
+#
+# minor fingerprint base-digest php-version image-digest published-utc
