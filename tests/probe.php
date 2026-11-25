@@ -14,10 +14,13 @@ $results = [];
 function check(string $name, callable $test): void
 {
     global $results;
-    try {
+    try
+    {
         $detail = $test();
         $results[] = $detail === true ? "ok $name" : "FAIL $name: " . var_export($detail, true);
-    } catch (Throwable $e) {
+    }
+    catch (Throwable $e)
+    {
         $results[] = "FAIL $name: " . get_class($e) . ': ' . $e->getMessage();
     }
 }
@@ -31,7 +34,8 @@ check('sapi', fn () => PHP_SAPI === 'fpm-fcgi' ?: PHP_SAPI);
 // with 0/1.
 check('zts', fn () => (bool) PHP_ZTS === version_compare($minor, '8.6', '>=') ?: PHP_ZTS);
 
-check('opcache', function () {
+check('opcache', function ()
+{
     $status = function_exists('opcache_get_status') ? opcache_get_status(false) : false;
     return (is_array($status) && $status['opcache_enabled'] === true) ?: $status;
 });
@@ -42,18 +46,23 @@ check('session', fn () => ($sessionStarted && session_status() === PHP_SESSION_A
 check('mbstring', fn () => (mb_strtoupper('äöü') === 'ÄÖÜ' && mb_strlen('äöü') === 3) ?: 'wrong result');
 check('mbregex', fn () => function_exists('mb_ereg') ?: 'mb_ereg missing');
 
-check('gd', function () {
+check('gd', function ()
+{
     $info = gd_info();
-    foreach (['JPEG Support', 'PNG Support', 'WebP Support'] as $key) {
-        if (($info[$key] ?? false) !== true) {
+    foreach (['JPEG Support', 'PNG Support', 'WebP Support'] as $key)
+    {
+        if (($info[$key] ?? false) !== true)
+        {
             return "$key missing";
         }
     }
     $image = imagecreatetruecolor(4, 4);
-    foreach (['imagejpeg', 'imagepng', 'imagewebp'] as $writer) {
+    foreach (['imagejpeg', 'imagepng', 'imagewebp'] as $writer)
+    {
         ob_start();
         $writer($image);
-        if (strlen((string) ob_get_clean()) === 0) {
+        if (strlen((string) ob_get_clean()) === 0)
+        {
             return "$writer wrote nothing";
         }
     }
@@ -62,15 +71,18 @@ check('gd', function () {
 
 check('exif', fn () => function_exists('exif_read_data') ?: 'exif_read_data missing');
 
-check('intl', function () {
+check('intl', function ()
+{
     $formatted = (new NumberFormatter('de_DE', NumberFormatter::DECIMAL))->format(1234.5);
     return ($formatted === '1.234,5' && Normalizer::normalize("e\u{0301}") === "\u{00e9}") ?: $formatted;
 });
 
-check('zip', function () {
+check('zip', function ()
+{
     $file = tempnam(sys_get_temp_dir(), 'zip');
     $zip = new ZipArchive();
-    if ($zip->open($file, ZipArchive::OVERWRITE) !== true) {
+    if ($zip->open($file, ZipArchive::OVERWRITE) !== true)
+    {
         return 'open for writing failed';
     }
     $zip->addFromString('a.txt', 'probe');
@@ -85,7 +97,8 @@ check('zip', function () {
 
 check('mysqli', fn () => class_exists('mysqli') ?: 'class mysqli missing');
 check('pgsql', fn () => function_exists('pg_connect') ?: 'pg_connect missing');
-check('pdo drivers', function () {
+check('pdo drivers', function ()
+{
     $drivers = PDO::getAvailableDrivers();
     $missing = array_diff(['mysql', 'pgsql', 'sqlite'], $drivers);
     return $missing === [] ?: implode(',', $drivers);
@@ -97,7 +110,8 @@ check('curl', fn () => function_exists('curl_init') ?: 'curl missing');
 check('openssl', fn () => defined('OPENSSL_VERSION_TEXT') ?: 'openssl missing');
 
 // The pool's restrictions must hold: these are what keep one site out of another.
-check('disable_functions', function () {
+check('disable_functions', function ()
+{
     $present = array_filter(['exec', 'shell_exec', 'system', 'passthru', 'popen', 'proc_open'], 'function_exists');
     return $present === [] ?: implode(',', $present);
 });

@@ -83,7 +83,11 @@ docker run --rm "${mounts[@]}" "$image" php-fpm -t || fail "php-fpm -t rejected 
 
 python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' "$work/run/test.sock"
 [ -S "$work/run/test.sock" ] || fail "could not create the stale socket for the test"
-stale_inode="$(stat -c %i "$work/run/test.sock")"
+# The stale socket belongs to the runner's user; FPM's belongs to www-data (listen.owner,
+# uid 33). The owner tells the two apart. (The inode does not: on 2026-11-25 the first run
+# saw FPM's new socket get the inode number of the stale one it had just unlinked.)
+stale_owner="$(stat -c %u "$work/run/test.sock")"
+[ "$stale_owner" != 33 ] || fail "the stale socket already belongs to uid 33; the owner check could not tell"
 
 echo "== start FPM"
 docker run -d --name "$name" "${mounts[@]}" "$image" > /dev/null
@@ -107,8 +111,8 @@ do
 done
 [ "$ready" -eq 1 ] || fail "FPM did not become ready within 30 s"
 [ -S "$work/run/test.sock" ] || fail "FPM did not create its socket"
-[ "$(stat -c %i "$work/run/test.sock")" != "$stale_inode" ] || fail "the socket is still the stale one"
-echo "ok: FPM replaced the stale socket and is ready"
+[ "$(stat -c %u "$work/run/test.sock")" = 33 ] || fail "the socket is still the stale one (owner $(stat -c %u "$work/run/test.sock"), not www-data)"
+echo "ok: FPM replaced the stale socket (owner uid ${stale_owner} -> 33) and is ready"
 
 echo "== FastCGI request"
 # env -i: cgi-fcgi passes its whole environment as FastCGI parameters, so only the request's

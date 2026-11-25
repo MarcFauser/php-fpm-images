@@ -13,7 +13,7 @@ FROM ${BASE}
 # igbinary and imagick from the same list are left out on purpose: igbinary only pays off
 # with an object cache, and GD already covers image handling without ImageMagick.
 # opcache is a separate extension up to PHP 8.4 (built into the core from 8.5 on).
-RUN apt-get update && apt-get install -y \
+RUN apt update && apt install -y \
     libicu-dev libzip-dev libpng-dev libjpeg62-turbo-dev libwebp-dev libpq-dev \
     && docker-php-ext-configure gd --with-jpeg --with-webp \
     && docker-php-ext-install -j "$(nproc)" \

@@ -6,6 +6,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This is the ver
 repository (Dockerfiles, tests, workflows); every image carries it in the label
 `io.github.marcfauser.php-fpm-images.version`. The image tags follow PHP.
 
+## [1.0.1] - 2026-11-25
+
+### Fixed
+
+- The stale-socket test told the stale socket and FPM's new one apart by the inode number,
+  and failed for all three images in the first run although FPM had replaced the socket:
+  ext4 gave the new socket the inode it had just freed. It now compares the owner (the
+  runner's user before, www-data afterwards).
+
+### Changed
+
+- The Dockerfiles use `apt` instead of `apt-get`, and `tests/probe.php` puts every opening
+  brace on its own line, as the conventions of the server project ask.
+
 ## [1.0.0] - 2026-11-25
 
 ### Added
